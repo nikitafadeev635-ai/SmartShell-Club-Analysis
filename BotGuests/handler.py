@@ -1,6 +1,7 @@
 """
 Модуль хендлеров Telegram бота CyberMG v4.
-Исправлен конфликт хендлеров контактов через StateFilter.
++ Реферальная система "Приведи друга"
++ Проверка новичков через Smartshell API
 """
 import logging
 from aiogram import Router, F
@@ -14,10 +15,14 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import connectAPI
+from connectAPI import check_client_exists_by_phone  # 🆕 ПРОВЕРКА SMARTSHELL
 from optionDB import (
     check_tg_id_exists, get_phone_by_tgid, save_phone_tg_link,
     check_sword_tg_exists, save_sword_phone, check_sword_secret_status,
-    set_sword_secret_success
+    set_sword_secret_success,
+    # 🆕 РЕФЕРАЛЬНАЯ СИСТЕМА:
+    save_referal, get_referals_count, update_state_sub,
+    save_referal
 )
 from normalizePhone import format_phone_pretty
 from config import CHANNEL_ID, SECRET_WORD
@@ -53,13 +58,27 @@ async def block_group_messages(message: Message):
 
 
 # ==========================================================
-# === 🚀 /start ===
+# === 🚀 /start (С ПАРСИНГОМ DEEP LINK) ===
 # ==========================================================
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     tg_id = message.from_user.id
+    
+    # 🆕 ПАРСИМ DEEP LINK (например: /start 123456789)
+    # Если ссылка "чистая" (без параметров) — args будет None, рефералка не сработает
+    referrer_tg_id = None
+    if message.text and ' ' in message.text:
+        args = message.text.split(' ', 1)[1]
+        if args.isdigit():
+            referrer_tg_id = int(args)
+            if referrer_tg_id == tg_id:
+                referrer_tg_id = None  # Сам себя пригласить нельзя
+    if referrer_tg_id:
+        await state.update_data(referrer_tg_id=referrer_tg_id)
+        logger.info(f"🔗 Новый юзер {tg_id} пришёл по реф.ссылке от {referrer_tg_id}")
+    
     is_known = await check_tg_id_exists(tg_id)
 
     if is_known:
@@ -68,6 +87,7 @@ async def cmd_start(message: Message, state: FSMContext):
         text = fmt.get_returning_user_message(pretty)
 
         is_subscribed = await _real_check_sub(tg_id)
+        await update_state_sub(tg_id, is_subscribed)  # 🆕 обновляем stateSub
 
         if is_subscribed:
             await message.answer(
@@ -93,10 +113,9 @@ async def cmd_start(message: Message, state: FSMContext):
 
 
 # ==========================================================
-# === 📱 ТЕЛЕФОН (ОСНОВНОЙ) ===
+# === 📱 ТЕЛЕФОН (ОСНОВНОЙ + РЕФЕРАЛКА) ===
 # ==========================================================
 
-# 🆕 ИСПРАВЛЕНО: добавлен StateFilter(None) - работает ТОЛЬКО вне состояний!
 @router.callback_query(StateFilter(None), F.data == "share_phone")
 async def ask_phone(callback: CallbackQuery):
     tg_id = callback.from_user.id
@@ -112,10 +131,9 @@ async def ask_phone(callback: CallbackQuery):
     await callback.answer()
 
 
-# 🆕 ИСПРАВЛЕНО: добавлен StateFilter(None) - перехватывает только ОСНОВНОЙ контакт!
 @router.message(StateFilter(None), F.contact)
-async def got_contact(message: Message):
-    """Основная привязка телефона (стартовое окно)."""
+async def got_contact(message: Message, state: FSMContext):
+    """Основная привязка телефона + логика рефералов (по ТЗ)."""
     contact = message.contact
     if contact.user_id != message.from_user.id:
         await message.answer("⚠️ Номер принадлежит другому пользователю!")
@@ -123,8 +141,48 @@ async def got_contact(message: Message):
 
     phone = contact.phone_number
     tg_id = message.from_user.id
+
+    data = await state.get_data()
+    referrer_tg_id = data.get('referrer_tg_id')
+
     saved = await save_phone_tg_link(phone, tg_id)
     pretty = format_phone_pretty(phone)
+
+    # 🆕 РЕФЕРАЛЬНАЯ ЛОГИКА ПО ТЗ
+    if referrer_tg_id and saved:
+        # Параллельная проверка на всех 6 точках через clients(q=phone)
+        is_existing_client = await connectAPI.check_client_exists_on_any_warehouse(phone)
+
+        if is_existing_client:
+            # Старичок - грустный диалог, запись в Referals НЕ создаём
+            await message.answer(
+                "😔 <b>Ой, кажется мы уже знакомы!</b>\n\n"
+                "Ты уже зарегистрирован в системе CYBERMG. "
+                "Акция 'Приведи друга' действует только для новичков, "
+                "которых ещё не было ни в одном клубе сети.",
+                parse_mode="HTML"
+            )
+        else:
+            # Новичок - крутой диалог + запись в Referals (val=0, used=0)
+            await message.answer(
+                "🔥 <b>Добро пожаловать в CYBERMG, новичок!</b>\n\n"
+                "У тебя теперь есть <b>наставник</b>, который привел тебя! "
+                "Ты можешь удвоить свои первые три пополнения и скрестить шпаги с другом ⚔️",
+                parse_mode="HTML",
+                reply_markup=fmt.get_referal_success_keyboard()
+            )
+            await save_referal(referrer_tg_id, tg_id)
+            logger.info(f"🤝 НОВИЧОК: {tg_id} привязан к наставнику {referrer_tg_id}")
+
+    elif referrer_tg_id and not saved:
+        await message.answer(
+            "ℹ️ <b>Ты уже с нами!</b>\n\n"
+            "Реферальная программа доступна только для новых гостей, "
+            "которых ещё нет в базе клубов.",
+            parse_mode="HTML"
+        )
+
+    await state.clear()
 
     if saved:
         phone_msg = f"✅ <b>Номер привязан!</b>\n📱 <code>{pretty}</code>"
@@ -134,6 +192,7 @@ async def got_contact(message: Message):
     await message.answer(phone_msg, parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
 
     is_subscribed = await _real_check_sub(tg_id)
+
     if is_subscribed:
         await message.answer(
             fmt.get_subscription_success_message(),
@@ -152,15 +211,15 @@ async def got_contact(message: Message):
         builder.adjust(1)
         await message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
-
 # ==========================================================
 # === 🔍 ПРОВЕРКА ПОДПИСКИ ===
 # ==========================================================
 
 @router.callback_query(F.data == "check_sub")
 async def process_check_sub(callback: CallbackQuery, state: FSMContext):
-    await state.clear()  # Сбрасываем состояния при проверке подписки
+    await state.clear()
     is_subscribed = await _real_check_sub(callback.from_user.id)
+    await update_state_sub(callback.from_user.id, is_subscribed)  # 🆕 обновляем stateSub
 
     if is_subscribed:
         await _safe_edit(
@@ -399,11 +458,8 @@ async def about_branch(callback: CallbackQuery):
     """О клубах: фото без подписи + полное описание отдельно."""
     slug = callback.data.split(":", 1)[1]
     
-    # Полный текст описания
     full_text = fmt.get_about_branch_text(slug)
-    # Картинка
     image = fmt.get_about_branch_image(slug)
-    # Клавиатура
     kb = fmt.get_back_to_menu_keyboard()
 
     try:
@@ -412,13 +468,11 @@ async def about_branch(callback: CallbackQuery):
         pass
 
     if image:
-        # 📸 Фото БЕЗ подписи
         await callback.message.answer_photo(
             photo=image,
             parse_mode="HTML"
         )
     
-    # 📝 Полное описание отдельным сообщением (с кнопкой возврата)
     await callback.message.answer(
         full_text,
         parse_mode="HTML",
@@ -427,6 +481,50 @@ async def about_branch(callback: CallbackQuery):
     
     await callback.answer()
 
+
+# ==========================================================
+# === 🤝 РЕФЕРАЛЬНАЯ СИСТЕМА (НОВОЕ) ===
+# ==========================================================
+
+@router.callback_query(F.data == "referals")
+async def referals_menu(callback: CallbackQuery):
+    """Меню 'Приведи друга'."""
+    await _safe_edit(
+        callback.message,
+        fmt.get_referal_menu_text(),
+        fmt.get_referal_menu_keyboard()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "ref:my_link")
+async def referal_my_link(callback: CallbackQuery):
+    """Страница с персональной реферальной ссылкой."""
+    tg_id = callback.from_user.id
+    bot_info = await connectAPI.bot.get_me()
+    link = f"https://t.me/{bot_info.username}?start={tg_id}"
+    await _safe_edit(
+        callback.message,
+        fmt.get_referal_link_text(link),
+        fmt.get_referal_link_keyboard(link)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "ref:my_referals")
+async def referal_my_list(callback: CallbackQuery):
+    """Статистика рефералов наставника."""
+    tg_id = callback.from_user.id
+    count = await get_referals_count(tg_id)
+    
+    await _safe_edit(
+        callback.message,
+        fmt.get_referals_count_text(count),
+        fmt.get_referal_menu_keyboard()
+    )
+    await callback.answer()
+
+
 # ==========================================================
 # === ⚔️ ФЕСТИВАЛЬ СРЕДНЕВЕКОВЬЯ (FSM) ===
 # ==========================================================
@@ -434,7 +532,7 @@ async def about_branch(callback: CallbackQuery):
 @router.callback_query(F.data == "festival:start")
 async def festival_start(callback: CallbackQuery, state: FSMContext):
     """Начало фестиваля."""
-    await state.clear()  # Сбрасываем состояния перед стартом
+    await state.clear()
     tg_id = callback.from_user.id
     is_known = await check_sword_tg_exists(tg_id)
 
@@ -478,7 +576,6 @@ async def festival_got_phone(message: Message, state: FSMContext):
     phone = contact.phone_number
     tg_id = message.from_user.id
     
-    # 🆕 Сохраняем в SWORDBASE, а не в testWork!
     await save_sword_phone(phone, tg_id)
     pretty = format_phone_pretty(phone)
     
@@ -488,7 +585,6 @@ async def festival_got_phone(message: Message, state: FSMContext):
         reply_markup=ReplyKeyboardRemove()
     )
     
-    # Переходим к ожиданию секретного слова
     await state.set_state(FestivalStates.waiting_for_secret)
     await message.answer(
         fmt.get_festival_ask_word_text(),

@@ -113,6 +113,7 @@ def get_main_menu_keyboard():
     builder.button(text="📩 Связаться с директором", callback_data="director")
     builder.button(text="🖥 Забронировать ПК", callback_data="booking")
     builder.button(text="🗺 Навигация", callback_data="nav:hub")
+    builder.button(text="🤝 Приведи друга", callback_data="referals")  # 🆕 НОВАЯ КНОПКА
     builder.button(text="⚔️ Фестиваль средневековья", callback_data="festival:start")
     builder.button(text="📢 Наш канал", url=f"https://t.me/{CHANNEL_USERNAME}")
     builder.adjust(1)
@@ -654,6 +655,69 @@ def get_festival_retry_keyboard():
 def get_festival_back_keyboard():
     builder = InlineKeyboardBuilder()
     builder.button(text="🏠 Главное меню", callback_data="main_menu")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+# ==========================================================
+# === 🤝 РЕФЕРАЛЬНАЯ СИСТЕМА (НОВОЕ) === 🆕
+# ==========================================================
+
+def get_referal_menu_text() -> str:
+    """Текст меню 'Приведи друга'."""
+    return (
+        "🤝 <b>Приведи друга — получи бонусы!</b>\n\n"
+        "Приглашай друзей в CYBERMG по своей уникальной ссылке.\n"
+        "Как только друг зарегистрируется и пополнит баланс на <b>1000₽</b>, "
+        "ты получишь <b>300 бонусов</b> на свой аккаунт 🎁\n\n"
+        "Выбери нужный раздел:"
+    )
+
+
+def get_referal_menu_keyboard():
+    """Меню реферальной программы."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔗 Моя ссылка", callback_data="ref:my_link")
+    builder.button(text="👥 Мои рефералы", callback_data="ref:my_referals")
+    builder.button(text="⬅️ В главное меню", callback_data="main_menu")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_referal_link_text(link: str) -> str:
+    """Текст с реферальной ссылкой."""
+    return (
+        "🔗 <b>Твоя реферальная ссылка:</b>\n\n"
+        f"<code>{link}</code>\n\n"
+        "Отправь её другу! Как только он по ней зарегистрируется и пополнит баланс "
+        "на <b>1000₽</b> — ты получишь <b>300 бонусов</b> на свой клубный аккаунт 🎁"
+    )
+
+
+def get_referal_link_keyboard(link: str):
+    """Клавиатура для страницы с ссылкой."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📤 Отправить другу", url=f"https://t.me/share/url?url={link}&text=Го_в_CYBERMG!")
+    builder.button(text="⬅️ Назад", callback_data="referals")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def get_referals_count_text(count: int, active_count: int = 0) -> str:
+    """Текст со статистикой рефералов."""
+    return (
+        "👥 <b>Твои рефералы</b>\n\n"
+        f"Всего приглашено: <b>{count}</b> чел.\n"
+        f"Активных (с бонусом): <b>{active_count}</b> чел.\n\n"
+        "Продолжай приглашать друзей и копи бонусы! 💎"
+    )
+
+
+def get_referal_success_keyboard():
+    """Клавиатура после успешной регистрации реферала (новичок)."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🏢 Выбрать клуб", callback_data="nav:about")
+    builder.button(text="🏠 В главное меню", callback_data="main_menu")
     builder.adjust(1)
     return builder.as_markup()
 

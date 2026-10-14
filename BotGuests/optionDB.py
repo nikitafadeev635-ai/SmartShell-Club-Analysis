@@ -153,3 +153,175 @@ async def set_sword_secret_success(tg_id: int) -> bool:
     except Exception as e:
         logger.error(f"❌ Ошибка set_sword_secret_success: {e}")
         return False
+
+
+# ==========================================================
+# === 🆕 РЕФЕРАЛЬНАЯ СИСТЕМА (Referals) ===
+# ==========================================================
+
+async def save_referal(tg_id: int, tg_referal: int, value: float) -> bool:
+    """
+    Сохраняет реферальную связку в таблицу Referals.
+    tg_id - тот кто пригласил (наставник)
+    tg_referal - тг ID реферала (ученик)
+    value - сумма пополнения для активации бонуса
+    """
+    if not connectAPI.db_pool:
+        return False
+    try:
+        async with connectAPI.db_pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""
+                    INSERT INTO Referals (tg_id, tg_referal, used, value)
+                    VALUES (%s, %s, 0, %s)
+                    ON DUPLICATE KEY UPDATE 
+                        tg_id = VALUES(tg_id),
+                        value = VALUES(value)
+                """, (tg_id, tg_referal, value))
+                logger.info(f"🤝 Реферал сохранён: наставник {tg_id} -> ученик {tg_referal}")
+                return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка save_referal: {e}")
+        return False
+
+
+async def update_state_sub(tg_id: int, is_subscribed: bool) -> bool:
+    """
+    Обновляет поле stateSub в таблице phone_tg_links.
+    Показывает, подписан ли пользователь на ТГ канал.
+    """
+    if not connectAPI.db_pool:
+        return False
+    try:
+        async with connectAPI.db_pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"UPDATE {DB_TABLE} SET stateSub = %s WHERE tg_id = %s",
+                    (1 if is_subscribed else 0, tg_id)
+                )
+                logger.info(f"📢 Обновлён stateSub для {tg_id}: {is_subscribed}")
+                return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка update_state_sub: {e}")
+        return False
+
+
+async def get_referals_count(tg_id: int) -> int:
+    """
+    Возвращает количество рефералов у наставника.
+    """
+    if not connectAPI.db_pool:
+        return 0
+    try:
+        async with connectAPI.db_pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT COUNT(*) FROM Referals WHERE tg_id = %s", (tg_id,)
+                )
+                result = await cur.fetchone()
+                count = result[0] if result else 0
+                logger.info(f"👥 Наставник {tg_id} имеет {count} рефералов")
+                return count
+    except Exception as e:
+        logger.error(f"❌ Ошибка get_referals_count: {e}")
+        return 0
+
+
+async def check_referal_exists(tg_referal: int) -> bool:
+    """
+    Проверяет, есть ли уже запись о реферале в таблице Referals.
+    """
+    if not connectAPI.db_pool:
+        return False
+    try:
+        async with connectAPI.db_pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT 1 FROM Referals WHERE tg_referal = %s LIMIT 1", (tg_referal,)
+                )
+                return (await cur.fetchone()) is not None
+    except Exception as e:
+        logger.error(f"❌ Ошибка check_referal_exists: {e}")
+        return False
+
+
+# ==========================================================
+# === 🤝 РЕФЕРАЛЬНАЯ СИСТЕМА (по ТЗ) ===
+# ==========================================================
+
+async def save_referal(tg_id: int, tg_referal: int) -> bool:
+    """Создаёт запись в Referals (val=0, used=0) для новичка."""
+    if not connectAPI.db_pool:
+        return False
+    try:
+        async with connectAPI.db_pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("""
+                    INSERT INTO Referals (tg_id, tg_referal, used, value)
+                    VALUES (%s, %s, 0, 0)
+                    ON DUPLICATE KEY UPDATE tg_id = VALUES(tg_id)
+                """, (tg_id, tg_referal))
+                logger.info(f"🤝 Запись Referals создана: наставник {tg_id} -> ученик {tg_referal}")
+                return True
+    except Exception as e:
+        logger.error(f"❌ save_referal: {e}")
+        return False
+
+
+async def update_referal_state(referal_id: int, val: int, used: int):
+    if not connectAPI.db_pool:
+        return
+    try:
+        async with connectAPI.db_pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE Referals SET value=%s, used=%s WHERE id=%s",
+                    (val, used, referal_id)
+                )
+    except Exception as e:
+        logger.error(f"❌ update_referal_state: {e}")
+
+
+async def update_referal_uuid_point(referal_id: int, uuid_referal: str, point: str):
+    if not connectAPI.db_pool:
+        return
+    try:
+        async with connectAPI.db_pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE Referals SET uuid_referal=%s, point=%s WHERE id=%s",
+                    (uuid_referal, point, referal_id)
+                )
+    except Exception as e:
+        logger.error(f"❌ update_referal_uuid_point: {e}")
+
+
+async def update_referal_uuid_referer(referal_id: int, uuid_referer: str):
+    if not connectAPI.db_pool:
+        return
+    try:
+        async with connectAPI.db_pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE Referals SET uuid_referer=%s WHERE id=%s",
+                    (uuid_referer, referal_id)
+                )
+    except Exception as e:
+        logger.error(f"❌ update_referal_uuid_referer: {e}")
+
+
+async def get_referals_count(tg_id: int) -> int:
+    """Счётчик для раздела 'Мои рефералы'."""
+    if not connectAPI.db_pool:
+        return 0
+    try:
+        async with connectAPI.db_pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT COUNT(*) FROM Referals WHERE tg_id = %s", (tg_id,)
+                )
+                result = await cur.fetchone()
+                return result[0] if result else 0
+    except Exception as e:
+        logger.error(f"❌ get_referals_count: {e}")
+        return 0

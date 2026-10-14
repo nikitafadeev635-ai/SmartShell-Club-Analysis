@@ -1,5 +1,6 @@
 """Конфигурация бота CyberMG (PROD)."""
 import os
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -12,7 +13,7 @@ IMAGE_DIR = BASE_DIR / "image"
 # === TELEGRAM ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "cybergymvl") 
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "cybergymvl")
 
 # === 🗄️ DATABASE ===
 DB_HOST = os.getenv("DB_HOST")
@@ -20,8 +21,8 @@ DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_NAME = os.getenv("DB_NAME")
 DB_PORT = int(os.getenv("DB_PORT", 3306))
-DB_TABLE = os.getenv("DB_TABLE", "phone_tg_links")  
-SWORD_TABLE = os.getenv("SWORD_TABLE", "swordbase") 
+DB_TABLE = os.getenv("DB_TABLE", "phone_tg_links")
+SWORD_TABLE = os.getenv("SWORD_TABLE", "swordbase")
 
 # === СЕКРЕТНОЕ СЛОВО ===
 SECRET_WORD = os.getenv("SECRET_WORD", "ведьмак")
@@ -29,12 +30,20 @@ SECRET_WORD = os.getenv("SECRET_WORD", "ведьмак")
 # === ОТОБРАЖЕНИЕ ===
 WELCOME_STYLE = "classic"
 
-# === ЛИМИТЫ АКЦИИ ===
-MAX_BONUS_PER_TOPUP = 1000
-MAX_ELIGIBLE_TOPUPS = 3
+# === 🏢 SMARTSHELL API ===
+SMARTSHELL_GRAPHQL_URL = os.getenv("SMARTSHELL_GRAPHQL_URL", "https://billing.smartshell.gg/api/graphql")
+SMARTSHELL_LOGIN = os.getenv("SMARTSHELL_LOGIN")
+SMARTSHELL_PASSWORD = os.getenv("SMARTSHELL_PASSWORD")
 
-# === КЭШ ПОДПИСКИ ===
-SUBSCRIPTION_CACHE_TTL = 300
+warehouses_json = os.getenv("SMARTSHELL_WAREHOUSES", "{}")
+SMARTSHELL_WAREHOUSES = json.loads(warehouses_json)
+
+# === 🤝 РЕФЕРАЛЬНАЯ ПРОГРАММА ===
+MIN_TOPUP_AMOUNT = 150.0                    # Минимальная сумма пополнения
+BONUS_PREMIUM = 500                         # Для Сахалинская/Калинина
+BONUS_STANDARD = 250                        # Для остальных точек
+PREMIUM_WAREHOUSES = ["Сахалинская", "Калинина"]
+REFERAL_TIMEOUT_DAYS = 30                   # Таймаут ожидания (дней)
 
 # === ЛОГИРОВАНИЕ ===
 LOG_LEVEL = "INFO"
