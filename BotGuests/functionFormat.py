@@ -109,11 +109,19 @@ def get_main_menu_text() -> str:
 
 def get_main_menu_keyboard():
     """Главное меню: без стартового окна, с каналом и фестивалем."""
+    from config import REFERAL_FEATURE_ENABLED  # импортируем флаг
+    
     builder = InlineKeyboardBuilder()
     builder.button(text="📩 Связаться с директором", callback_data="director")
     builder.button(text="🖥 Забронировать ПК", callback_data="booking")
     builder.button(text="🗺 Навигация", callback_data="nav:hub")
-    builder.button(text="🤝 Приведи друга", callback_data="referals")  # 🆕 НОВАЯ КНОПКА
+    
+    # 🎯 Кнопка "Приведи друга" с условным поведением
+    if REFERAL_FEATURE_ENABLED:
+        builder.button(text="🤝 Приведи друга", callback_data="referals")
+    else:
+        builder.button(text="🤝 Приведи друга (в разработке)", callback_data="referals_dev")
+    
     builder.button(text="⚔️ Фестиваль средневековья", callback_data="festival:start")
     builder.button(text="📢 Наш канал", url=f"https://t.me/{CHANNEL_USERNAME}")
     builder.adjust(1)
@@ -668,8 +676,8 @@ def get_referal_menu_text() -> str:
     return (
         "🤝 <b>Приведи друга — получи бонусы!</b>\n\n"
         "Приглашай друзей в CYBERMG по своей уникальной ссылке.\n"
-        "Как только друг зарегистрируется и пополнит баланс на <b>1000₽</b>, "
-        "ты получишь <b>300 бонусов</b> на свой аккаунт 🎁\n\n"
+        "Как только друг зарегистрируется и пополнит баланс на <b>150₽</b>, "
+        "ты получишь <b>от 250 бонусов</b> на свой аккаунт 🎁\n\n"
         "Выбери нужный раздел:"
     )
 
@@ -690,7 +698,8 @@ def get_referal_link_text(link: str) -> str:
         "🔗 <b>Твоя реферальная ссылка:</b>\n\n"
         f"<code>{link}</code>\n\n"
         "Отправь её другу! Как только он по ней зарегистрируется и пополнит баланс "
-        "на <b>1000₽</b> — ты получишь <b>300 бонусов</b> на свой клубный аккаунт 🎁"
+        "на <b>150₽</b> — ты получишь <b>от 250 бонусов</b> на свой клубный аккаунт 🎁"
+        "Для наших клубов по адресу Калинина,283а и Сахалинская,50В за приведенного другом можно <b>получить 500 бонусов</b>!"
     )
 
 

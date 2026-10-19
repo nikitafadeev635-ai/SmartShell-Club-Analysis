@@ -15,14 +15,13 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import connectAPI
-from connectAPI import check_client_exists_by_phone  # 🆕 ПРОВЕРКА SMARTSHELL
+from connectAPI import check_client_exists_on_any_warehouse
 from optionDB import (
     check_tg_id_exists, get_phone_by_tgid, save_phone_tg_link,
     check_sword_tg_exists, save_sword_phone, check_sword_secret_status,
     set_sword_secret_success,
     # 🆕 РЕФЕРАЛЬНАЯ СИСТЕМА:
     save_referal, get_referals_count, update_state_sub,
-    save_referal
 )
 from normalizePhone import format_phone_pretty
 from config import CHANNEL_ID, SECRET_WORD
@@ -130,7 +129,6 @@ async def ask_phone(callback: CallbackQuery):
     )
     await callback.answer()
 
-
 @router.message(StateFilter(None), F.contact)
 async def got_contact(message: Message, state: FSMContext):
     """Основная привязка телефона + логика рефералов (по ТЗ)."""
@@ -151,15 +149,28 @@ async def got_contact(message: Message, state: FSMContext):
     # 🆕 РЕФЕРАЛЬНАЯ ЛОГИКА ПО ТЗ
     if referrer_tg_id and saved:
         # Параллельная проверка на всех 6 точках через clients(q=phone)
-        is_existing_client = await connectAPI.check_client_exists_on_any_warehouse(phone)
+        # Теперь возвращает список найденных клиентов
+        found_clients = await connectAPI.check_client_exists_on_any_warehouse(phone)
+        is_existing_client = len(found_clients) > 0
 
         if is_existing_client:
-            # Старичок - грустный диалог, запись в Referals НЕ создаём
+            # Старичок - грустный диалог с детальной информацией
+            points_info = []
+            for client in found_clients:
+                points_info.append(
+                    f"📍 <b>{client['point']}</b>\n"
+                    f"   💰 Депозит: <code>{client['deposit']:.2f}₽</code>\n"
+                    f"   🎁 Бонусы: <code>{client['bonus']:.2f}₽</code>"
+                )
+            
+            points_text = "\n\n".join(points_info)
+            
             await message.answer(
-                "😔 <b>Ой, кажется мы уже знакомы!</b>\n\n"
-                "Ты уже зарегистрирован в системе CYBERMG. "
-                "Акция 'Приведи друга' действует только для новичков, "
-                "которых ещё не было ни в одном клубе сети.",
+                f"😔 <b>Ой, кажется мы уже знакомы!</b>\n\n"
+                f"Ты уже зарегистрирован в системе CYBERMG.\n\n"
+                f"<b>Твои аккаунты в клубах:</b>\n\n{points_text}\n\n"
+                f"Акция 'Приведи друга' действует только для новичков, "
+                f"которых ещё не было ни в одном клубе сети.",
                 parse_mode="HTML"
             )
         else:
@@ -167,7 +178,7 @@ async def got_contact(message: Message, state: FSMContext):
             await message.answer(
                 "🔥 <b>Добро пожаловать в CYBERMG, новичок!</b>\n\n"
                 "У тебя теперь есть <b>наставник</b>, который привел тебя! "
-                "Ты можешь удвоить свои первые три пополнения и скрестить шпаги с другом ⚔️",
+                "Ты можешь получить бонусы за пополнение и скрестить шпаги с другом ⚔️",
                 parse_mode="HTML",
                 reply_markup=fmt.get_referal_success_keyboard()
             )
@@ -483,12 +494,31 @@ async def about_branch(callback: CallbackQuery):
 
 
 # ==========================================================
-# === 🤝 РЕФЕРАЛЬНАЯ СИСТЕМА (НОВОЕ) ===
+# === 🤝 РЕФЕРАЛЬНАЯ СИСТЕМА ===
 # ==========================================================
+
+@router.callback_query(F.data == "referals_dev")
+async def referals_dev_placeholder(callback: CallbackQuery):
+    """
+    🚧 Заглушка: функция в разработке.
+    Срабатывает когда REFERAL_FEATURE_ENABLED = false
+    """
+    await callback.answer(
+        "🚧Функция находится в разработке!\n"
+        "Скоро здесь появится возможность приглашать друзей "
+        "и получать бонусы за их первое пополнение!\n\n"
+        "Следи за новостями в нашем канале 📢",
+        show_alert=True,
+        cache_time=5
+    )
+
 
 @router.callback_query(F.data == "referals")
 async def referals_menu(callback: CallbackQuery):
-    """Меню 'Приведи друга'."""
+    """
+    ✅ Рабочее меню 'Приведи друга'.
+    Срабатывает когда REFERAL_FEATURE_ENABLED = true
+    """
     await _safe_edit(
         callback.message,
         fmt.get_referal_menu_text(),
@@ -627,7 +657,6 @@ async def festival_retry(callback: CallbackQuery, state: FSMContext):
         fmt.get_festival_back_keyboard()
     )
     await callback.answer()
-
 
 # ==========================================================
 # === 🛠️ УТИЛИТЫ ===

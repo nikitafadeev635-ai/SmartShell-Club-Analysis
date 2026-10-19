@@ -418,15 +418,27 @@ class DepositMonitor:
 
                     return result
 
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            except Exception as e:
+                # 🔧 РАСШИРЕННОЕ ЛОГИРОВАНИЕ ОШИБОК
+                error_type = type(e).__name__
                 logger.warning(
-                    f"⚠️ Сетевая ошибка (попытка {attempt + 1}/{SMARTSHELL_MAX_RETRIES}): {e}"
+                    f"⚠️ Сетевая/Системная ошибка [{error_type}] "
+                    f"(попытка {attempt + 1}/{SMARTSHELL_MAX_RETRIES}): {repr(e)}",
+                    exc_info=True  # <--- ЭТО ВЫВЕДЕТ ПОЛНЫЙ ТРЕЙСБЕК В ЛОГ
                 )
+                
                 if attempt < SMARTSHELL_MAX_RETRIES - 1:
                     await asyncio.sleep(SMARTSHELL_RETRY_DELAY * (attempt + 1))
+                    
+                    # Пересоздаем сессию с отключенной проверкой SSL (для диагностики)
                     if self.session and not self.session.closed:
                         await self.session.close()
-                    self.session = aiohttp.ClientSession(headers=BROWSER_HEADERS)
+                    
+                    connector = aiohttp.TCPConnector(ssl=False)
+                    self.session = aiohttp.ClientSession(
+                        headers=BROWSER_HEADERS, 
+                        connector=connector
+                    )
                 else:
                     raise
 

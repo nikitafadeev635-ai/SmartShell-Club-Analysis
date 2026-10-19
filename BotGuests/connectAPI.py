@@ -4,6 +4,7 @@ import time
 import asyncio
 import aiohttp
 import aiomysql
+from typing import List, Dict, Optional, Tuple
 from aiogram import Bot
 from config import (
     BOT_TOKEN, DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT, DB_TABLE,
@@ -16,16 +17,23 @@ logger = logging.getLogger(__name__)
 bot: Bot = None
 db_pool = None
 
-_smartshell_token = None
-_smartshell_token_time = 0
-_smartshell_token_company_id = None
+# 🎯 ПРАВИЛЬНОЕ кэширование токенов: словарь company_id → (token, timestamp)
+# Решает проблему race condition при параллельных запросах на 6 точек
+_smartshell_tokens: Dict[int, Tuple[str, float]] = {}
 
 # GraphQL запрос поиска клиента по q (по ТЗ)
 CLIENTS_SEARCH_QUERY = """
 query clients($input: ClientsInput, $first: Int, $page: Int) {
   clients(input: $input, first: $first, page: $page) {
     paginatorInfo { count currentPage lastPage total }
-    data { id uuid nickname phone deposit bonus }
+    data {
+      id
+      uuid
+      nickname
+      phone
+      deposit
+      bonus
+    }
   }
 }
 """
@@ -60,12 +68,21 @@ async def init_database():
 
 
 async def _get_smartshell_token(company_id: int) -> str:
-    global _smartshell_token, _smartshell_token_time, _smartshell_token_company_id
-    if (_smartshell_token
-        and (time.time() - _smartshell_token_time) < 3500
-        and _smartshell_token_company_id == company_id):
-        return _smartshell_token
+    """
+    Получает/обновляет токен Smartshell для конкретной точки (company_id).
+    
+    🎯 ИСПРАВЛЕНО: используется словарь токенов вместо глобальных переменных.
+    Это решает проблему race condition при параллельных запросах на 6 точек.
+    Каждая точка имеет свой изолированный кэш токена.
+    """
+    global _smartshell_tokens
+    
+    # Проверяем кэш для ЭТОЙ конкретной точки
+    cached = _smartshell_tokens.get(company_id)
+    if cached and (time.time() - cached[1]) < 3500:
+        return cached[0]
 
+    # Запрашиваем новый токен для этой точки
     login_query = f"""
     mutation login {{
         login(input: {{ login: "{SMARTSHELL_LOGIN}", password: "{SMARTSHELL_PASSWORD}", company_id: {company_id} }}) {{
@@ -83,68 +100,168 @@ async def _get_smartshell_token(company_id: int) -> str:
             data = await resp.json()
             token = data.get("data", {}).get("login", {}).get("access_token")
             if not token:
-                raise RuntimeError(f"Токен Smartshell не получен: {data}")
-            _smartshell_token = token
-            _smartshell_token_time = time.time()
-            _smartshell_token_company_id = company_id
+                raise RuntimeError(f"Токен Smartshell не получен для company_id={company_id}: {data}")
+            
+            # Сохраняем в кэш для этой точки
+            _smartshell_tokens[company_id] = (token, time.time())
+            logger.info(f"🔑 Токен получен/обновлён для company_id={company_id}")
             return token
 
 
-async def search_client_by_phone_on_warehouse(phone: str, company_id: int) -> bool:
-    """Проверяет наличие клиента на конкретной точке через clients(q=phone)."""
+async def search_client_by_phone_on_warehouse(phone: str, company_id: int) -> Optional[Dict]:
+    """
+    Проверяет наличие клиента на конкретной точке через clients(q=phone).
+    Возвращает словарь с информацией о клиенте или None если не найден.
+    """
     normalized = normalize_phone(phone)
-    try:
-        token = await _get_smartshell_token(company_id)
-        variables = {
-            "input": {"q": normalized, "sort": {"field": "last_client_activity", "direction": "DESC"}},
-            "first": 25,
-            "page": 1
-        }
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
-        async with aiohttp.ClientSession() as sess:
-            async with sess.post(
-                SMARTSHELL_GRAPHQL_URL,
-                json={"query": CLIENTS_SEARCH_QUERY, "variables": variables},
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                data = await resp.json()
-                if "errors" in data:
-                    logger.warning(f"⚠️ Ошибка GraphQL на {company_id}: {data['errors']}")
-                    return False
-                clients = data.get("data", {}).get("clients", {}).get("data", []) or []
-                return len(clients) > 0
-    except Exception as e:
-        logger.error(f"❌ search_client_by_phone_on_warehouse({company_id}): {e}")
-        return False
+    
+    # Получаем warehouse_name из company_id через обратный поиск
+    warehouse_name = None
+    for name, cid in SMARTSHELL_WAREHOUSES.items():
+        if cid == company_id:
+            warehouse_name = name
+            break
+    
+    if not warehouse_name:
+        logger.error(f"❌ Не найден warehouse_name для company_id={company_id}")
+        return None
+    
+    # Пробуем разные форматы номера
+    phone_variants = [
+        normalized,                    # 79502887547
+        f"+{normalized}",              # +79502887547
+        f"8{normalized[1:]}",          # 89502887547
+    ]
+    
+    for phone_format in phone_variants:
+        try:
+            token = await _get_smartshell_token(company_id)
+            variables = {
+                "input": {"q": phone_format, "sort": {"field": "last_client_activity", "direction": "DESC"}},
+                "first": 25,
+                "page": 1
+            }
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+            
+            logger.info(f"🔍 Поиск на точке '{warehouse_name}' (ID:{company_id}): phone={phone_format}")
+            
+            async with aiohttp.ClientSession() as sess:
+                async with sess.post(
+                    SMARTSHELL_GRAPHQL_URL,
+                    json={"query": CLIENTS_SEARCH_QUERY, "variables": variables},
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=15)
+                ) as resp:
+                    # 🎯 Обработка 401 Unauthorized - обновляем токен и повторяем
+                    if resp.status == 401:
+                        logger.warning(f"🔑 Токен устарел для {warehouse_name}, обновляю...")
+                        token = await _get_smartshell_token(company_id)
+                        headers["Authorization"] = f"Bearer {token}"
+                        # Повторяем запрос
+                        async with sess.post(
+                            SMARTSHELL_GRAPHQL_URL,
+                            json={"query": CLIENTS_SEARCH_QUERY, "variables": variables},
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=15)
+                        ) as resp2:
+                            data = await resp2.json()
+                    else:
+                        data = await resp.json()
+                    
+                    if "errors" in data:
+                        # Проверяем, не связана ли ошибка с токеном
+                        error_msg = data["errors"][0].get("message", "").lower()
+                        if "unauthorized" in error_msg or "token" in error_msg:
+                            logger.warning(f"🔑 GraphQL auth error на {warehouse_name}, обновляю токен...")
+                            token = await _get_smartshell_token(company_id)
+                            headers["Authorization"] = f"Bearer {token}"
+                            async with sess.post(
+                                SMARTSHELL_GRAPHQL_URL,
+                                json={"query": CLIENTS_SEARCH_QUERY, "variables": variables},
+                                headers=headers,
+                                timeout=aiohttp.ClientTimeout(total=15)
+                            ) as resp3:
+                                data = await resp3.json()
+                        
+                        if "errors" in data:
+                            logger.warning(f"⚠️ GraphQL ошибка на {warehouse_name}: {data['errors']}")
+                            continue
+                    
+                    clients = data.get("data", {}).get("clients", {}).get("data", []) or []
+                    
+                    if clients:
+                        client = clients[0]
+                        result = {
+                            "point": warehouse_name,
+                            "company_id": company_id,
+                            "uuid": client.get("uuid"),
+                            "phone": client.get("phone"),
+                            "nickname": client.get("nickname"),
+                            "deposit": float(client.get("deposit", 0) or 0),
+                            "bonus": float(client.get("bonus", 0) or 0),
+                        }
+                        logger.info(
+                            f"✅ НАЙДЕН! Точка '{warehouse_name}': "
+                            f"phone={result['phone']}, "
+                            f"deposit={result['deposit']}₽, "
+                            f"bonus={result['bonus']}₽"
+                        )
+                        return result
+                    else:
+                        logger.info(f"   Не найден на точке '{warehouse_name}' (формат {phone_format})")
+                        
+        except Exception as e:
+            logger.error(f"❌ Ошибка поиска на точке '{warehouse_name}': {e}")
+            continue
+    
+    return None
 
 
-async def check_client_exists_on_any_warehouse(phone: str) -> bool:
+async def check_client_exists_on_any_warehouse(phone: str) -> List[Dict]:
     """
     Параллельно проверяет клиента на ВСЕХ 6 точках через clients(q=phone).
-    Возвращает True если найден хотя бы на одной точке (старичок).
-    False если нигде не найден (новичок).
+    
+    Возвращает:
+    - Пустой список [] если клиент нигде не найден (новичок)
+    - Список словарей с информацией о клиенте на каждой точке (старичок)
+    
+    Пример возврата для старичка:
+    [
+        {"point": "Сахалинская", "deposit": 150.0, "bonus": 300.0, "uuid": "..."},
+        {"point": "Калинина", "deposit": 0.0, "bonus": 50.0, "uuid": "..."},
+    ]
     """
     if not all([SMARTSHELL_GRAPHQL_URL, SMARTSHELL_LOGIN, SMARTSHELL_PASSWORD]):
         logger.warning("⚠️ Smartshell API не настроен в .env")
-        return False
+        return []
 
+    # Передаём только company_id (warehouse_name получим внутри функции)
     company_ids = list(SMARTSHELL_WAREHOUSES.values())
-
-    # Запускаем параллельные запросы ко всем точкам
     tasks = [search_client_by_phone_on_warehouse(phone, cid) for cid in company_ids]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    for r in results:
-        if r is True:
-            logger.info(f"✅ Клиент {phone} найден хотя бы на одной точке (СТАРЫЙ)")
-            return True
+    found_clients = []
+    for result in results:
+        if isinstance(result, dict) and result is not None:
+            found_clients.append(result)
+        elif isinstance(result, Exception):
+            logger.error(f"❌ Ошибка в параллельном запросе: {result}")
 
-    logger.info(f"❌ Клиент {phone} не найден ни на одной точке (НОВИЧОК)")
-    return False
+    if found_clients:
+        logger.info(f"✅ Клиент {phone} найден на {len(found_clients)} точках (СТАРЫЙ)")
+        for client in found_clients:
+            logger.info(
+                f"   📍 {client['point']}: "
+                f"депозит={client['deposit']}₽, "
+                f"бонусы={client['bonus']}₽"
+            )
+    else:
+        logger.info(f"❌ Клиент {phone} не найден ни на одной точке (НОВИЧОК)")
+
+    return found_clients
 
 
 async def init_all_connections():

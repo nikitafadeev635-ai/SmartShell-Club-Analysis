@@ -49,3 +49,10 @@ REFERAL_TIMEOUT_DAYS = 30                   # Таймаут ожидания (�
 LOG_LEVEL = "INFO"
 LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(message)s"
 LOG_DATEFMT = "%H:%M:%S"
+
+# === 🚧 ФЛАГ РЕФЕРАЛЬНОЙ СИСТЕМЫ ===
+# false = "в разработке" (кнопка не работает, показывает alert)
+# true  = включена (кнопка ведёт в меню рефералов)
+REFERAL_FEATURE_ENABLED = os.getenv("REFERAL_FEATURE_ENABLED", "false").lower() == "true"
+# === КЭШ ПОДПИСКИ (для middleware) ===
+SUBSCRIPTION_CACHE_TTL = int(os.getenv("SUBSCRIPTION_CACHE_TTL", 300))
