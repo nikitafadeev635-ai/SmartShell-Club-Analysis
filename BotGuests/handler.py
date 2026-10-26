@@ -4,6 +4,7 @@
 + Проверка новичков через Smartshell API
 """
 import logging
+import asyncio
 from aiogram import Router, F
 from aiogram.types import (
     Message, CallbackQuery,
@@ -21,10 +22,10 @@ from optionDB import (
     check_sword_tg_exists, save_sword_phone, check_sword_secret_status,
     set_sword_secret_success,
     # 🆕 РЕФЕРАЛЬНАЯ СИСТЕМА:
-    save_referal, get_referals_count, update_state_sub,
+    save_referal, get_referals_count, get_referrals_page, update_telegram_username, update_state_sub,
 )
 from normalizePhone import format_phone_pretty
-from config import CHANNEL_ID, SECRET_WORD
+from config import CHANNEL_ID, SECRET_WORD, REFERAL_FEATURE_ENABLED
 import functionFormat as fmt
 
 logger = logging.getLogger(__name__)
@@ -79,8 +80,21 @@ async def cmd_start(message: Message, state: FSMContext):
         logger.info(f"🔗 Новый юзер {tg_id} пришёл по реф.ссылке от {referrer_tg_id}")
     
     is_known = await check_tg_id_exists(tg_id)
+    if is_known and referrer_tg_id and REFERAL_FEATURE_ENABLED:
+        known_phone = await get_phone_by_tgid(tg_id)
+        if known_phone:
+            await _register_referral_from_link(
+                message, referrer_tg_id, tg_id, known_phone)
+        else:
+            request_contact = ReplyKeyboardMarkup(
+                keyboard=[[KeyboardButton(text="📱 Поделиться номером", request_contact=True)]],
+                resize_keyboard=True, one_time_keyboard=True)
+            await message.answer(
+                "⚠️ Номер в CyberMJ не найден. Поделись контактом для участия.",
+                reply_markup=request_contact)
 
     if is_known:
+        await update_telegram_username(tg_id, message.from_user.username)
         raw_phone = await get_phone_by_tgid(tg_id)
         pretty = format_phone_pretty(raw_phone) if raw_phone else "—"
         text = fmt.get_returning_user_message(pretty)
@@ -144,10 +158,22 @@ async def got_contact(message: Message, state: FSMContext):
     referrer_tg_id = data.get('referrer_tg_id')
 
     saved = await save_phone_tg_link(phone, tg_id)
+    await update_telegram_username(tg_id, message.from_user.username)
     pretty = format_phone_pretty(phone)
+    # Unified referral eligibility for new and returning CyberMJ users.
+    if referrer_tg_id and REFERAL_FEATURE_ENABLED:
+        verified_phone = await get_phone_by_tgid(tg_id)
+        if verified_phone:
+            await _register_referral_from_link(
+                message, referrer_tg_id, tg_id, verified_phone)
+        else:
+            await message.answer(
+                "⚠️ Телефон не сохранён в базе, приглашение не создано.")
+        # Suppress legacy referral handling below, preserving all other flow.
+        referrer_tg_id = None
 
     # 🆕 РЕФЕРАЛЬНАЯ ЛОГИКА ПО ТЗ
-    if referrer_tg_id and saved:
+    if referrer_tg_id and saved and REFERAL_FEATURE_ENABLED:
         # Параллельная проверка на всех 6 точках через clients(q=phone)
         # Теперь возвращает список найденных клиентов
         found_clients = await connectAPI.check_client_exists_on_any_warehouse(phone)
@@ -170,7 +196,13 @@ async def got_contact(message: Message, state: FSMContext):
                 f"Ты уже зарегистрирован в системе CYBERMG.\n\n"
                 f"<b>Твои аккаунты в клубах:</b>\n\n{points_text}\n\n"
                 f"Акция 'Приведи друга' действует только для новичков, "
-                f"которых ещё не было ни в одном клубе сети.",
+                f"которых ещё не было ни в одном клубе нашей сети.\n\n"
+                "Не переживайте(&gt;&lt;)\n"
+                "У нас есть крутая акция на первые 3 пополнения!!! "
+                "Вы можете получить до 3000 бонусов 🎁.\n\n"
+                "Следите за нашими новостями в нашем сообществе, "
+                "чтобы всегда быть в центре событий нашей вселенной!\n\n"
+                "С любовью, CyberMG!",
                 parse_mode="HTML"
             )
         else:
@@ -184,6 +216,9 @@ async def got_contact(message: Message, state: FSMContext):
             )
             await save_referal(referrer_tg_id, tg_id)
             logger.info(f"🤝 НОВИЧОК: {tg_id} привязан к наставнику {referrer_tg_id}")
+
+    elif referrer_tg_id and saved and not REFERAL_FEATURE_ENABLED:
+        await message.answer('ℹ️ Реферальная программа пока недоступна.')
 
     elif referrer_tg_id and not saved:
         await message.answer(
@@ -515,10 +550,10 @@ async def referals_dev_placeholder(callback: CallbackQuery):
 
 @router.callback_query(F.data == "referals")
 async def referals_menu(callback: CallbackQuery):
-    """
-    ✅ Рабочее меню 'Приведи друга'.
-    Срабатывает когда REFERAL_FEATURE_ENABLED = true
-    """
+    """Реферальное меню, проверяем флаг даже для старых кнопок."""
+    if not REFERAL_FEATURE_ENABLED:
+        await callback.answer('Реферальная программа пока недоступна', show_alert=True)
+        return
     await _safe_edit(
         callback.message,
         fmt.get_referal_menu_text(),
@@ -530,6 +565,9 @@ async def referals_menu(callback: CallbackQuery):
 @router.callback_query(F.data == "ref:my_link")
 async def referal_my_link(callback: CallbackQuery):
     """Страница с персональной реферальной ссылкой."""
+    if not REFERAL_FEATURE_ENABLED:
+        await callback.answer('Реферальная программа пока недоступна', show_alert=True)
+        return
     tg_id = callback.from_user.id
     bot_info = await connectAPI.bot.get_me()
     link = f"https://t.me/{bot_info.username}?start={tg_id}"
@@ -541,19 +579,55 @@ async def referal_my_link(callback: CallbackQuery):
     await callback.answer()
 
 
-@router.callback_query(F.data == "ref:my_referals")
+# === CYBERMJ REFERRALS LIST V1 ===
+@router.callback_query(F.data.startswith("ref:my_referals"))
 async def referal_my_list(callback: CallbackQuery):
-    """Статистика рефералов наставника."""
-    tg_id = callback.from_user.id
-    count = await get_referals_count(tg_id)
-    
-    await _safe_edit(
-        callback.message,
-        fmt.get_referals_count_text(count),
-        fmt.get_referal_menu_keyboard()
-    )
+    """Only inviter gets their friends; refresh public handles on page view."""
+    if not REFERAL_FEATURE_ENABLED:
+        await callback.answer('Программа пока недоступна', show_alert=True)
+        return
+    page = 0
+    if callback.data and callback.data.startswith('ref:my_referals:'):
+        try:
+            page = max(0, min(100000, int(callback.data.rsplit(':', 1)[1])))
+        except (ValueError, TypeError):
+            page = 0
+    stats = await get_referrals_page(callback.from_user.id, page=page)
+    if stats is None:
+        await callback.answer('Не удалось получить список. Попробуй позже.', show_alert=True)
+        return
+
+    # Acknowledge Telegram callback before potentially slow get_chat calls.
     await callback.answer()
 
+    # Backfill pre-existing referrals and refresh changed public usernames.
+    # Telegram get_chat() may fail for privacy/access reasons: never show stale
+    # cached usernames that could have been reassigned to a different person.
+    semaphore = asyncio.Semaphore(3)
+
+    async def refresh_public_username(row):
+        async with semaphore:
+            try:
+                chat = await asyncio.wait_for(
+                    callback.bot.get_chat(row['tg_referal']), timeout=5.0
+                )
+            except Exception as exc:
+                logger.debug('Cannot refresh TG username %s: %s', row['tg_referal'], exc)
+                row['username'] = None
+                return
+            fresh_username = getattr(chat, 'username', None)
+            if fresh_username != row.get('username'):
+                await update_telegram_username(row['tg_referal'], fresh_username)
+            row['username'] = fresh_username
+
+    if stats['rows']:
+        await asyncio.gather(*(refresh_public_username(row) for row in stats['rows']))
+
+    await _safe_edit(
+        callback.message,
+        fmt.get_referrals_list_text(stats),
+        fmt.get_referrals_page_keyboard(stats['page'], stats['pages'])
+    )
 
 # ==========================================================
 # === ⚔️ ФЕСТИВАЛЬ СРЕДНЕВЕКОВЬЯ (FSM) ===
@@ -682,3 +756,83 @@ async def _safe_edit(message: Message, text: str, reply_markup):
         except Exception:
             pass
         await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+
+# === CYBERMJ REFERRAL USERNAME LINKS V1 ===
+
+from optionDB import get_referral_owner, create_referral_once
+from config import REFERAL_FEATURE_ENABLED
+
+
+# === CYBERMJ EXISTING BOT USERS REFERRALS V1 ===
+async def _register_referral_from_link(message, inviter_tg_id: int,
+                                       invitee_tg_id: int, phone: str):
+    """Eligibility is about SmartShell accounts, not prior CyberMJ registration.
+
+    Never changes phone_tg_links or an existing referral owner. Fail closed on
+    unavailable SmartShell or DB. Returning a message is not a payment promise.
+    """
+    if inviter_tg_id == invitee_tg_id:
+        return
+    try:
+        owner = await get_referral_owner(invitee_tg_id)
+    except Exception:
+        logger.exception('Referral owner lookup failed')
+        await message.answer('⚠️ Не удалось проверить приглашение. Попробуй ещё раз позже.')
+        return
+    if owner is not None:
+        await message.answer('ℹ️ Ты уже закреплён за пригласившим. Повторная ссылка не меняет участие.')
+        return
+
+    try:
+        found_clients = await connectAPI.check_clients_for_referral_strict(phone)
+    except Exception:
+        logger.exception('SmartShell client status check failed for invitee %s', invitee_tg_id)
+        await message.answer('⚠️ Проверка SmartShell временно недоступна. Открой ссылку позже — запись пока не создана.')
+        return
+
+    if found_clients:
+        points_info = []
+        for client in found_clients:
+            points_info.append(
+                f"📍 <b>{client['point']}</b>\n"
+                f"   💰 Депозит: <code>{client['deposit']:.2f}₽</code>\n"
+                f"   🎁 Бонусы: <code>{client['bonus']:.2f}₽</code>"
+            )
+        points_text = '\n\n'.join(points_info)
+        await message.answer(
+            f'😔 <b>Ой, кажется мы уже знакомы!</b>\n\n'
+            f'Ты уже зарегистрирован в системе CYBERMG.\n\n'
+            f'<b>Твои аккаунты в клубах:</b>\n\n{points_text}\n\n'
+            f'Акция «Приведи друга» действует только для новичков, '
+            f'которых ещё не было ни в одном клубе нашей сети.\n\n'
+            f'Не переживайте(&gt;&lt;)\n'
+            f'У нас есть крутая акция на первые 3 пополнения!!! '
+            f'Вы можете получить до 3000 бонусов 🎁.\n\n'
+            f'Следите за нашими новостями в нашем сообществе, '
+            f'чтобы всегда быть в центре событий нашей вселенной!\n\n'
+            f'С любовью, CyberMG!',
+            parse_mode='HTML'
+        )
+        return
+
+    try:
+        status = await create_referral_once(inviter_tg_id, invitee_tg_id)
+    except Exception:
+        logger.exception('Referral creation failed for %s', invitee_tg_id)
+        await message.answer('⚠️ Не удалось сохранить приглашение. Попробуй ещё раз позже.')
+        return
+    if status == 'created':
+        await message.answer(
+            '🔥 <b>Добро пожаловать в реферальную программу CYBERMG!</b>\n\n'
+            'Твой номер уже привязан к боту, и в SmartShell пока нет клубных '
+            'аккаунтов. Приглашение зарегистрировано — осталось выполнить '
+            'условия акции! 🎁',
+            parse_mode='HTML',
+            reply_markup=fmt.get_referal_success_keyboard()
+        )
+        logger.info('Referral created: inviter %s, invitee %s', inviter_tg_id, invitee_tg_id)
+    elif status == 'exists':
+        await message.answer('ℹ️ Приглашение уже зарегистрировано. Смена пригласившего недоступна.')
+    else:
+        await message.answer('⚠️ Не удалось сохранить приглашение. Попробуй ещё раз позже.')
+

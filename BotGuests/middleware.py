@@ -27,7 +27,7 @@ PUBLIC_CALLBACKS = {
 PROTECTED_PREFIXES = (
     "nav:", "nav_", "promo", "pc_build", "price_", "social",
     "smartgamer", "review_", "about", "branch:", "director",
-    "booking", "reviews", "festival", "sword"
+    "booking", "reviews", "festival", "sword", "referals", "ref:"
 )
 
 
@@ -111,3 +111,5 @@ class SubscriptionMiddleware(BaseMiddleware):
                     return None
 
         return await handler(event, data)
+
+# === CYBERMJ REFERRALS LIST V1 ===

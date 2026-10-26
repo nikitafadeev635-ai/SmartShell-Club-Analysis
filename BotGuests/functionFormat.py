@@ -686,7 +686,7 @@ def get_referal_menu_keyboard():
     """Меню реферальной программы."""
     builder = InlineKeyboardBuilder()
     builder.button(text="🔗 Моя ссылка", callback_data="ref:my_link")
-    builder.button(text="👥 Мои рефералы", callback_data="ref:my_referals")
+    builder.button(text="👥 Приглашённые друзья", callback_data="ref:my_referals")
     builder.button(text="⬅️ В главное меню", callback_data="main_menu")
     builder.adjust(1)
     return builder.as_markup()
@@ -755,3 +755,64 @@ def get_branch_image(prefix: str, slug: str):
     if not filename:
         return None
     return get_image_path(filename)
+
+
+# === CYBERMJ REFERRALS LIST V1 ===
+def _mask_invited_phone(phone: str) -> str:
+    """Show only a masked phone; no full invited phone in Telegram."""
+    digits = ''.join(ch for ch in str(phone or '') if ch.isdigit())
+    if len(digits) == 11 and digits.startswith('8'):
+        digits = '7' + digits[1:]
+    if len(digits) == 10:
+        digits = '7' + digits
+    if len(digits) == 11 and digits.startswith('7'):
+        return f'+7 {digits[1]}** ***-{digits[-4:-2]}-{digits[-2:]}'
+    return 'Не указан'
+
+
+def get_referrals_list_text(stats: dict) -> str:
+    """Mobile-friendly: index | masked phone | clickable username | bonus."""
+    total = stats['total']
+    rewarded = stats['rewarded']
+    lines = [
+        '👥 <b>Приглашённые друзья</b>', '',
+        f'Всего приглашено: <b>{total}</b>',
+        f'Бонус получен: <b>{rewarded}</b>',
+        f'Бонус ещё не получен: <b>{total - rewarded}</b>', '',
+        '<b>№ | Телефон | Telegram | Бонус</b>',
+    ]
+    if not stats['rows']:
+        lines.append('Пока никого нет. Отправь другу свою ссылку!')
+    for pos, row in enumerate(stats['rows'], 1 + stats['page'] * stats['page_size']):
+        status = '✅ Да' if row['bonus_received'] else '❌ Нет'
+        phone = _mask_invited_phone(row.get('phone'))
+        username = _referral_username_link(row.get('username'))
+        lines.append(f'{pos}. <code>{phone}</code> | {username} | {status}')
+    lines.extend([
+        '', f'Страница {stats["page"]+1}/{stats["pages"]}',
+        '<i>«Нет» означает, что бонус ещё не начислен. '
+        'Тег доступен, если пользователь установил публичный @username.</i>',
+    ])
+    return '\n'.join(lines)
+
+
+def get_referrals_page_keyboard(page: int, pages: int):
+    builder = InlineKeyboardBuilder()
+    if page > 0:
+        builder.button(text='◀️ Назад', callback_data=f'ref:my_referals:{page-1}')
+    if page + 1 < pages:
+        builder.button(text='Далее ▶️', callback_data=f'ref:my_referals:{page+1}')
+    builder.button(text='🔄 Обновить', callback_data=f'ref:my_referals:{page}')
+    builder.button(text='⬅️ К реферальному меню', callback_data='referals')
+    builder.adjust(2, 1, 1)
+    return builder.as_markup()
+
+def _referral_username_link(username: str | None) -> str:
+    """Return clickable t.me only for valid public user handles."""
+    import re
+    name = str(username or '').strip().lstrip('@')
+    if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{4,31}', name):
+        return 'без @username'
+    return f'<a href="https://t.me/{name}">@{name}</a>'
+
+# === CYBERMJ REFERRAL USERNAME LINKS V1 ===

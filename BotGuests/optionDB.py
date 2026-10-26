@@ -325,3 +325,136 @@ async def get_referals_count(tg_id: int) -> int:
     except Exception as e:
         logger.error(f"❌ get_referals_count: {e}")
         return 0
+
+
+# === CYBERMJ REFERRALS LIST V1 ===
+async def get_referrals_page(tg_id: int, page: int = 0, page_size: int = 8):
+    """Page of only this inviter's referrals, including the Telegram handle cache."""
+    if not connectAPI.db_pool:
+        logger.error('get_referrals_page: MySQL pool unavailable')
+        return None
+    import re
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', DB_TABLE):
+        raise ValueError('Invalid DB_TABLE identifier')
+    page_size = max(1, min(int(page_size), 15))
+    page = max(0, int(page))
+    try:
+        async with connectAPI.db_pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    'SELECT COUNT(*), '
+                    'COALESCE(SUM(CASE WHEN used=1 AND value=1 THEN 1 ELSE 0 END),0) '
+                    'FROM Referals WHERE tg_id=%s',
+                    (tg_id,)
+                )
+                total, rewarded = await cur.fetchone()
+                total, rewarded = int(total or 0), int(rewarded or 0)
+                pages = max(1, (total + page_size - 1) // page_size)
+                page = min(page, pages - 1)
+                await cur.execute(
+                    f'SELECT r.id, r.tg_referal, r.used, r.value, p.phone, '
+                    f'p.telegram_username FROM Referals AS r '
+                    f'LEFT JOIN {DB_TABLE} AS p ON p.tg_id = r.tg_referal '
+                    f'WHERE r.tg_id = %s '
+                    f'ORDER BY r.id DESC LIMIT %s OFFSET %s',
+                    (tg_id, page_size, page * page_size)
+                )
+                rows = await cur.fetchall()
+        return {
+            'total': total,
+            'rewarded': rewarded,
+            'page': page,
+            'pages': pages,
+            'page_size': page_size,
+            'rows': [
+                {
+                    'referral_id': int(r[0]),
+                    'tg_referal': int(r[1]),
+                    'phone': r[4],
+                    'username': r[5],
+                    'bonus_received': int(r[2] or 0) == 1 and int(r[3] or 0) == 1,
+                }
+                for r in rows
+            ],
+        }
+    except Exception:
+        logger.exception('get_referrals_page failed for inviter %s', tg_id)
+        return None
+
+async def update_telegram_username(tg_id: int, username: str | None) -> bool:
+    """Save username only for an existing, phone-verified TG user.
+
+    A missing username clears a previous one. Never creates a new identity.
+    """
+    if not connectAPI.db_pool:
+        return False
+    import re
+    safe_name = str(username or '').strip().lstrip('@')
+    if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{4,31}', safe_name):
+        safe_name = None
+    try:
+        async with connectAPI.db_pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f'UPDATE {DB_TABLE} SET telegram_username=%s WHERE tg_id=%s',
+                    (safe_name, tg_id)
+                )
+        return True
+    except Exception:
+        logger.exception('Failed to update TG username for %s', tg_id)
+        return False
+
+# === CYBERMJ REFERRAL USERNAME LINKS V1 ===
+
+
+# === CYBERMJ EXISTING BOT USERS REFERRALS V1 ===
+async def get_referral_owner(tg_referal: int):
+    """Return inviter id or None; DB failure raises rather than implying absence."""
+    if not connectAPI.db_pool:
+        raise RuntimeError('MySQL pool unavailable')
+    async with connectAPI.db_pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                'SELECT tg_id FROM Referals WHERE tg_referal=%s LIMIT 1',
+                (tg_referal,)
+            )
+            row = await cur.fetchone()
+            return int(row[0]) if row else None
+
+
+async def create_referral_once(inviter_tg_id: int, invitee_tg_id: int) -> str:
+    """No UPDATE/UPSERT: preserve existing inviter and any settled used/value flags.
+
+    IMPORTANT: requires UNIQUE KEY on Referals(tg_referal) for race safety.
+    """
+    if inviter_tg_id == invitee_tg_id:
+        return 'exists'
+    if not connectAPI.db_pool:
+        raise RuntimeError('MySQL pool unavailable')
+    async with connectAPI.db_pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            # Protect from parallel clicks across bot workers even when MySQL
+            # was deployed without the expected schema migration.
+            await cur.execute('SHOW INDEX FROM Referals')
+            index_rows = await cur.fetchall()
+            unique_indexes = {}
+            for idx in index_rows:
+                if int(idx[1]) == 0:
+                    unique_indexes.setdefault(idx[2], []).append(idx[4])
+            if ['tg_referal'] not in unique_indexes.values():
+                raise RuntimeError('Referals.tg_referal must have its own UNIQUE index')
+            try:
+                await cur.execute(
+                    'INSERT INTO Referals (tg_id,tg_referal,used,value) '
+                    'VALUES (%s,%s,0,0)',
+                    (inviter_tg_id, invitee_tg_id)
+                )
+                return 'created'
+            except Exception as exc:
+                # MySQL 1062 is duplicate key. Other failures must never look
+                # like existing referral or successful insertion.
+                code = exc.args[0] if getattr(exc, 'args', None) else None
+                if code == 1062:
+                    return 'exists'
+                raise
+
